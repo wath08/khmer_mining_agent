@@ -7,7 +7,7 @@ TARGET_SITES = [
 
 START_PAGE = 1
 PAGES_PER_RUN = 3
-REQUEST_DELAY = 0.3
+REQUEST_DELAY = 1.5
 
 if __name__ == "__main__":
     print("==================================================")

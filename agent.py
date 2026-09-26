@@ -21,20 +21,28 @@ class MiningAgent:
         self.visited = set()
         self.queue = []
         self.gemini_model = None
+        self.api_keys = getattr(config, 'GEMINI_API_KEYS', [])
+        self.current_key_idx = 0
 
-        if not getattr(config, 'GEMINI_API_KEY', None):
-            print("[WARNING] GEMINI_API_KEY is not found in environment/.env. Will use heuristic fallback.")
+        if not self.api_keys:
+            print("[WARNING] No GEMINI_API_KEYS found in environment/.env. Will use heuristic fallback.")
         elif HAS_GEMINI:
-            genai.configure(api_key=config.GEMINI_API_KEY)
-            model_name = getattr(config, 'GEMINI_MODEL', 'gemini-2.5-flash')
+            self._init_gemini_model()
+        else:
+            print("[WARNING] google-generativeai package is not installed.")
+
+    def _init_gemini_model(self):
+        if self.current_key_idx < len(self.api_keys):
+            api_key = self.api_keys[self.current_key_idx]
+            genai.configure(api_key=api_key)
+            model_name = getattr(config, 'GEMINI_MODEL', 'gemini-1.5-flash')
             model_name = model_name.replace("models/", "").strip()
             try:
                 self.gemini_model = genai.GenerativeModel(model_name)
+                print(f"[SYSTEM] Active Gemini API Key: #{self.current_key_idx + 1} of {len(self.api_keys)}")
             except Exception as e:
-                print(f"[WARNING] Could not initialize Gemini model '{model_name}': {e}. Falling back to heuristic.")
+                print(f"[WARNING] Could not initialize Gemini model '{model_name}': {e}")
                 self.gemini_model = None
-        else:
-            print("[WARNING] google-generativeai package is not installed.")
 
     def decide_news_links_with_ai(self, candidates: list[dict], current_url: str) -> list[str]:
         """
@@ -100,27 +108,41 @@ APPROVED: <url2>
 
         # 1. Gemini AI Call
         if self.gemini_model:
-            try:
-                response = self.gemini_model.generate_content(prompt)
-                output = response.text.strip()
+            for attempt in range(len(self.api_keys) - self.current_key_idx):
+                try:
+                    response = self.gemini_model.generate_content(prompt)
+                    output = response.text.strip()
 
-                reasoning = ""
-                for line in output.split('\n'):
-                    line = line.strip()
-                    if line.startswith("REASONING:"):
-                        reasoning = line.replace("REASONING:", "").strip()
-                    elif line.startswith("APPROVED:"):
-                        url = line.replace("APPROVED:", "").strip()
-                        if url and url.upper() != "NONE" and url.startswith("http"):
-                            approved_urls.append(url)
+                    reasoning = ""
+                    for line in output.split('\n'):
+                        line = line.strip()
+                        if line.startswith("REASONING:"):
+                            reasoning = line.replace("REASONING:", "").strip()
+                        elif line.startswith("APPROVED:"):
+                            url = line.replace("APPROVED:", "").strip()
+                            if url and url.upper() != "NONE" and url.startswith("http"):
+                                approved_urls.append(url)
 
-                if reasoning:
-                    print(f"[AI REASONING] {reasoning}")
-                print(f"[AI DECISION] Approved {len(approved_urls)} individual articles to crawl down.")
-                if approved_urls:
-                    return approved_urls
-            except Exception as e:
-                print(f"[AI ERROR] Gemini request failed ({e}). Falling back to heuristic decision.")
+                    if reasoning:
+                        print(f"[AI REASONING] {reasoning}")
+                    print(f"[AI DECISION] Approved {len(approved_urls)} individual articles to crawl down.")
+                    if approved_urls:
+                        return approved_urls
+                    break  # Success but no urls approved
+                except Exception as e:
+                    error_msg = str(e).lower()
+                    if "429" in error_msg or "quota" in error_msg or "exhausted" in error_msg:
+                        print(f"[AI ERROR] Key #{self.current_key_idx + 1} exhausted or rate-limited. Switching key...")
+                        self.current_key_idx += 1
+                        if self.current_key_idx < len(self.api_keys):
+                            self._init_gemini_model()
+                        else:
+                            print("[AI ERROR] All keys exhausted! Falling back to heuristic.")
+                            self.gemini_model = None
+                            break
+                    else:
+                        print(f"[AI ERROR] Gemini request failed ({e}). Falling back to heuristic decision.")
+                        break
 
         # 2. Intelligent Heuristic Fallback (Runs if Gemini fails, is unconfigured, or returned 0)
         print(f"[AI DECISION] (Heuristic Fallback) Filtering links based on date hints, query IDs, and article patterns...")

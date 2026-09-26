@@ -1,12 +1,20 @@
 import os
+import json
 from dotenv import load_dotenv
 
 load_dotenv()
 
 # AI Provider Settings
-# Options: "gemini" (Google Cloud API)
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")   # Fix: was "gemini-3.6-flash" (invalid model name)
+keys_json = os.getenv("GEMINI_API_KEYS", "[]")
+
+try:
+    # Try parsing as JSON array
+    GEMINI_API_KEYS = json.loads(keys_json)
+except Exception:
+    # Fallback to comma separated string if JSON parsing fails
+    GEMINI_API_KEYS = [k.strip() for k in keys_json.split(",") if k.strip()]
+
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
 
 # Storage Settings (Save all URLs into ONE consolidated file)
 OUTPUT_FILE = "data/khmer_articles.jsonl"
