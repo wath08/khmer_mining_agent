@@ -1,0 +1,28 @@
+khmer_mining_agent/
+│
+├── tools/                         # Core Modular Devices (The 8 Tools)
+│   ├── __init__.py                # Package exports for all tools
+│   ├── url_tracker.py             # Tool 1: Discovers links, manages queue, normalizes URLs, domain scope
+│   ├── url_hasher.py              # Tool 2: Converts URL into unique cryptographic hash (MD5/SHA-256)
+│   ├── hash_checker.py            # Tool 3: Ultra-fast cache lookup (0.001s) to prevent duplicate crawls
+│   ├── text_scraper.py            # Tool 4: Fast HTTP fetcher + Playwright fallback + Content Extractor
+│   ├── text_cleaner.py            # Tool 5: Unicode NFC normalizer, boilerplate & quote cleaner («...»)
+│   ├── text_verifier.py           # Tool 6: Quality gatekeeper (Khmer Ratio >= 60%, Min Length filter)
+│   ├── storage.py                 # Tool 7: Appends verified records to single-line UTF-8 .jsonl files
+│   └── notetaker.py               # Tool 8: Manages checkpoint logs across all 3 files in records/
+│
+├── records/                       # Persistent Checkpoints & Audit Logs
+│   ├── processed_urls.txt         # 1. Successfully crawled URLs (Success)
+│   ├── skipped_urls.txt           # 2. Detailed audit log of skipped URLs with failure reasons
+│   └── retry_links.txt            # 3. Clean raw URL list of skipped items for external system retries
+│
+├── output/                        # Final Processed Dataset Directory
+│   └── 04_government/             # Domain classification folder
+│       └── ministries/            # Output JSONL files (e.g., gov_mcfa.jsonl, gov_mef.jsonl)
+│
+├── agent.py                       # AI Agent: Autonomous decision maker & pattern discovery engine
+├── config.py                      # Configuration: Toggle between Ollama (Local/Unlimited) and Gemini
+├── main.py                        # Execution Entrypoint: Set TARGET_SITES and run
+├── requirements.txt               # Dependency specifications (httpx, bs4, trafilatura, etc.)
+├── structure.txt                  # Directory structure layout (this file)
+└── README.md                      # Comprehensive system documentation
