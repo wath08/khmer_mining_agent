@@ -19,6 +19,7 @@ class MiningAgent:
     def __init__(self):
         self.domain = ""
         self.visited = set()
+        self.queued = set()   # FIX Bug #5: O(1) lookup instead of list search
         self.queue = []
         self.gemini_model = None
         self.api_keys = getattr(config, 'GEMINI_API_KEYS', [])
@@ -32,6 +33,7 @@ class MiningAgent:
             print("[WARNING] google-generativeai package is not installed.")
 
     def _init_gemini_model(self):
+        """Initialize the Gemini model using the current active API key."""
         if self.current_key_idx < len(self.api_keys):
             api_key = self.api_keys[self.current_key_idx]
             genai.configure(api_key=api_key)
@@ -39,10 +41,25 @@ class MiningAgent:
             model_name = model_name.replace("models/", "").strip()
             try:
                 self.gemini_model = genai.GenerativeModel(model_name)
-                print(f"[SYSTEM] Active Gemini API Key: #{self.current_key_idx + 1} of {len(self.api_keys)}")
+                print(f"[SYSTEM] Active Gemini API Key: #{self.current_key_idx + 1} of {len(self.api_keys)} | Model: {model_name}")
             except Exception as e:
                 print(f"[WARNING] Could not initialize Gemini model '{model_name}': {e}")
                 self.gemini_model = None
+
+    def _rotate_to_next_key(self) -> bool:
+        """
+        FIX Bug #3: Safely rotate to the next API key.
+        Returns True if a new key was activated, False if all keys are exhausted.
+        """
+        self.current_key_idx += 1
+        if self.current_key_idx < len(self.api_keys):
+            print(f"[KEY ROTATION] Switching to API Key #{self.current_key_idx + 1}...")
+            self._init_gemini_model()
+            return True
+        else:
+            print("[KEY ROTATION] All API keys exhausted! Falling back to heuristic mode.")
+            self.gemini_model = None
+            return False
 
     def decide_news_links_with_ai(self, candidates: list[dict], current_url: str) -> list[str]:
         """
@@ -106,9 +123,9 @@ APPROVED: <url2>
 
         approved_urls = []
 
-        # 1. Gemini AI Call
+        # 1. Gemini AI Call with proper key rotation
         if self.gemini_model:
-            for attempt in range(len(self.api_keys) - self.current_key_idx):
+            while self.current_key_idx < len(self.api_keys):  # FIX Bug #3: use while loop
                 try:
                     response = self.gemini_model.generate_content(prompt)
                     output = response.text.strip()
@@ -128,18 +145,13 @@ APPROVED: <url2>
                     print(f"[AI DECISION] Approved {len(approved_urls)} individual articles to crawl down.")
                     if approved_urls:
                         return approved_urls
-                    break  # Success but no urls approved
+                    break  # Success but no urls approved — exit loop
                 except Exception as e:
                     error_msg = str(e).lower()
-                    if "429" in error_msg or "quota" in error_msg or "exhausted" in error_msg:
-                        print(f"[AI ERROR] Key #{self.current_key_idx + 1} exhausted or rate-limited. Switching key...")
-                        self.current_key_idx += 1
-                        if self.current_key_idx < len(self.api_keys):
-                            self._init_gemini_model()
-                        else:
-                            print("[AI ERROR] All keys exhausted! Falling back to heuristic.")
-                            self.gemini_model = None
-                            break
+                    if "429" in error_msg or "quota" in error_msg or "exhausted" in error_msg or "resource_exhausted" in error_msg:
+                        print(f"[AI ERROR] Key #{self.current_key_idx + 1} rate-limited or quota exhausted.")
+                        if not self._rotate_to_next_key():
+                            break  # All keys done, fall through to heuristic
                     else:
                         print(f"[AI ERROR] Gemini request failed ({e}). Falling back to heuristic decision.")
                         break
@@ -176,22 +188,45 @@ APPROVED: <url2>
         print(f"[AI DECISION] Approved {len(deduped)} individual articles to crawl down.")
         return deduped
 
-    def run(self, start_url: str, delay: float = 0.2):
+    def _fetch_with_retry(self, url: str, max_retries: int = 2) -> dict:
+        """
+        NEW FEATURE: Fetch a URL with automatic retry on network errors.
+        Retries up to max_retries times with a short delay between attempts.
+        """
+        for attempt in range(max_retries + 1):
+            data = fetch_and_extract(url)
+            if "error" not in data:
+                return data
+            if attempt < max_retries:
+                wait = (attempt + 1) * 2  # 2s, 4s backoff
+                print(f"[RETRY] Attempt {attempt + 1} failed. Retrying in {wait}s...")
+                time.sleep(wait)
+        return data  # Return last error result
+
+    def run(self, start_url: str, delay: float = 1.5):
+        # FIX Bug #4: Reset visited and queued sets at the start of EVERY run()
         self.queue = [start_url]
+        self.visited = set()
+        self.queued = {start_url}
         self.domain = urllib.parse.urlparse(start_url).netloc
 
         listing_pages = {start_url.rstrip('/'), start_url}
 
+        # FIX Bug #1: Use config.GEMINI_MODEL instead of hardcoded old name
+        model_label = (
+            f"GEMINI ({getattr(config, 'GEMINI_MODEL', 'gemini-1.5-flash')}) — Key #{self.current_key_idx + 1}"
+            if self.gemini_model else "HEURISTIC (No API Key / Fallback)"
+        )
+
         print(f"\n[SYSTEM] Autonomous Mining Agent Initialized.")
         print(f"[TARGET] {self.domain} | Listing URL: {start_url}")
-        model_label = (
-            f"GEMINI ({getattr(config, 'GEMINI_MODEL', 'gemini-2.5-flash')})"
-            if self.gemini_model else "HEURISTIC"
-        )
-        print(f"[BRAIN] {model_label}")
-        print("-" * 50)
+        print(f"[BRAIN]  {model_label}")
+        print("-" * 60)
 
         articles_saved = 0
+        total_visited = 0
+        total_skipped = 0
+        total_errors = 0
 
         # Listing-hub URL pattern matcher (compiled once per run, not per iteration)
         listing_hub_pattern = re.compile(
@@ -208,6 +243,7 @@ APPROVED: <url2>
                 continue
 
             self.visited.add(current_url)
+            total_visited += 1
             url_hashed = hash_url(current_url)
 
             print(f"\n[ACTION] Navigating to: {current_url}")
@@ -217,12 +253,13 @@ APPROVED: <url2>
                 print(f"[CACHE] URL {url_hashed[:8]}... already processed. Skipping.")
                 continue
 
-            # Fetch HTML
-            data = fetch_and_extract(current_url)
+            # FIX: Fetch with retry on network errors
+            data = self._fetch_with_retry(current_url)
 
             if "error" in data:
-                print(f"[ERROR] Failed to fetch: {data['error']}")
+                print(f"[ERROR] Failed to fetch after retries: {data['error']}")
                 record_retry_link(current_url, self.domain, data['error'])
+                total_errors += 1
                 continue
 
             if data.get("is_pdf"):
@@ -245,8 +282,10 @@ APPROVED: <url2>
 
                 new_links_added = 0
                 for link in ai_approved_links:
-                    if link not in self.visited and link not in self.queue:
+                    # FIX Bug #5: Use O(1) set lookup instead of O(n) list search
+                    if link not in self.visited and link not in self.queued:
                         self.queue.append(link)
+                        self.queued.add(link)
                         new_links_added += 1
 
                 print(f"[ACTION] Added {new_links_added} individual article links to queue. Current Queue: {len(self.queue)}.")
@@ -263,17 +302,28 @@ APPROVED: <url2>
 
             if verification["is_valid"]:
                 date_str = data.get("date") or "N/A"
-                print(f"[VERIFIED] Passed! Title: '{data.get('title', '')[:40]}...' | Date: {date_str}")
+                print(f"[VERIFIED] Passed! Title: '{data.get('title', '')[:50]}...' | Date: {date_str}")
                 data['text'] = cleaned_text
                 data['date'] = date_str
                 save_article(self.domain, data)
                 record_processed_url(current_url, self.domain)
-                print(f"[ACTION] Successfully saved individual article to data/{self.domain}.jsonl")
+                # FIX Bug #2: Print the actual correct output file path
+                print(f"[ACTION] Successfully saved article to → {config.OUTPUT_FILE}")
                 articles_saved += 1
             else:
                 print(f"[SKIPPED] {verification['reason']}")
                 record_skipped_url(current_url, self.domain, verification['reason'])
+                total_skipped += 1
 
             time.sleep(delay)
 
-        print(f"\n[SYSTEM] Job completed for {self.domain}. Successfully mined {articles_saved} individual articles.")
+        # NEW FEATURE: Print full summary stats at end of run
+        print(f"\n{'=' * 60}")
+        print(f"[DONE] Job completed for: {self.domain}")
+        print(f"  ✅ Articles Saved  : {articles_saved}")
+        print(f"  🔍 URLs Visited    : {total_visited}")
+        print(f"  ⏭️  URLs Skipped    : {total_skipped}")
+        print(f"  ❌ Fetch Errors    : {total_errors}")
+        print(f"  🔑 Active API Key  : #{self.current_key_idx + 1} of {len(self.api_keys)}")
+        print(f"  💾 Output File     : {config.OUTPUT_FILE}")
+        print(f"{'=' * 60}")
